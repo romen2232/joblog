@@ -34,6 +34,35 @@ restart: ## Restart all services
 build: ## Build the Docker images
 	$(DOCKER_COMPOSE) build
 
+.PHONY: init
+init: up install hooks migrate ## First-time project setup: start containers, install deps, configure git hooks, run migrations
+	@echo ""
+	@echo "✅ Joblog is ready!"
+	@echo ""
+	@echo "  Frontend → http://joblog.dev:3000"
+	@echo "  API      → http://api.joblog.dev"
+	@echo ""
+	@if ! grep -q "joblog.dev" /etc/hosts 2>/dev/null; then \
+		echo "⚠️  Add the following line to /etc/hosts:"; \
+		echo ""; \
+		echo "  127.0.0.1 joblog.dev api.joblog.dev"; \
+		echo ""; \
+		echo "  Run: sudo sh -c 'echo \"127.0.0.1 joblog.dev api.joblog.dev\" >> /etc/hosts'"; \
+	fi
+
+.PHONY: hosts
+hosts: ## Add joblog.dev domains to /etc/hosts (requires sudo)
+	@if grep -q "joblog.dev" /etc/hosts 2>/dev/null; then \
+		echo "✅ joblog.dev already in /etc/hosts"; \
+	else \
+		sudo sh -c 'echo "127.0.0.1 joblog.dev api.joblog.dev" >> /etc/hosts'; \
+		echo "✅ Added joblog.dev and api.joblog.dev to /etc/hosts"; \
+	fi
+
+.PHONY: hooks
+hooks: ## Install git hooks for pre-push checks
+	git config core.hooksPath .githooks
+
 .PHONY: ps
 ps: ## List running services and their status
 	$(DOCKER_COMPOSE) ps
@@ -100,8 +129,35 @@ test-e2e: ## Run Playwright end-to-end tests
 # -----------------------------------------------------------------------------
 
 .PHONY: lint
-lint: ## Lint the frontend
+lint: lint-backend lint-frontend ## Lint backend and frontend sources
+
+.PHONY: lint-backend
+lint-backend: phpstan php-cs-fixer-check ## Run PHPStan and PHP-CS-Fixer (dry-run)
+
+.PHONY: lint-frontend
+lint-frontend: ## Run ESLint and Prettier checks on the frontend
 	$(FRONTEND) npm run lint
+	$(FRONTEND) npm run format:check
+
+.PHONY: phpstan
+phpstan: ## Run PHPStan static analysis
+	@if [ -z "$$(docker compose exec -T api find src -name '*.php' -not -name 'Kernel.php' 2>/dev/null)" ]; then \
+		echo "No PHP files to analyse (skipping PHPStan)"; \
+	else \
+		$(API) vendor/bin/phpstan analyse --no-progress; \
+	fi
+
+.PHONY: php-cs-fixer-check
+php-cs-fixer-check: ## Check PHP code style (dry-run)
+	$(API) vendor/bin/php-cs-fixer check --diff --allow-risky=yes
+
+.PHONY: php-cs-fixer-fix
+php-cs-fixer-fix: ## Fix PHP code style issues in-place
+	$(API) vendor/bin/php-cs-fixer fix --diff --allow-risky=yes
+
+.PHONY: format
+format: php-cs-fixer-fix ## Auto-format all sources
+	$(FRONTEND) npm run format
 
 .PHONY: typecheck
 typecheck: ## Type-check the frontend
@@ -123,5 +179,24 @@ migrate-diff: ## Generate a migration from entity changes
 	$(API) php bin/console doctrine:migrations:diff
 
 .PHONY: migrate-status
-migrate-status: ## Show migration status
+migrate-status: ## Show database migration status
 	$(API) php bin/console doctrine:migrations:status
+
+# -----------------------------------------------------------------------------
+# Debugging
+# -----------------------------------------------------------------------------
+
+.PHONY: xdebug-on
+xdebug-on: ## Enable Xdebug step debugging (restarts the api container)
+	XDEBUG_MODE=debug $(DOCKER_COMPOSE) up -d api
+
+.PHONY: xdebug-off
+xdebug-off: ## Disable Xdebug (restarts the api container)
+	XDEBUG_MODE=off $(DOCKER_COMPOSE) up -d api
+
+.PHONY: debug-frontend
+debug-frontend: ## Start frontend with Node.js inspector on port 9229
+	FRONTEND_SCRIPT=debug $(DOCKER_COMPOSE) up -d frontend
+
+.PHONY: debug-on
+debug-on: xdebug-on debug-frontend ## Enable both backend and frontend debugging
